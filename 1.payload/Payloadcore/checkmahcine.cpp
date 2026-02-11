@@ -10,6 +10,7 @@
 #include <map>
 #include <json/json.h>
 #include <fstream>
+#include <sstream>
 #include <curl/curl.h>
 #include "utils.h"
 
@@ -642,6 +643,38 @@ void process_extension_directory(const fs::path& path, vector<string>& vecResult
 	}
 }
 
+// If expanded path is Chrome User Data\Default\Extensions, return all profile Extensions paths; otherwise return { expandedPath }.
+static vector<string> getExtensionPathsToScan(const string& expandedPath)
+{
+	vector<string> paths;
+	fs::path p(expandedPath);
+	string pathStr = p.make_preferred().string();
+	// Chrome User Data\Default\Extensions -> scan all profiles (Default, Profile 1, Profile 2, System Profile, etc.)
+	if (pathStr.find("Google") != string::npos && pathStr.find("Chrome") != string::npos &&
+		pathStr.find("User Data") != string::npos && pathStr.find("Default") != string::npos &&
+		pathStr.find("Extensions") != string::npos)
+	{
+		fs::path userDataPath = p.parent_path().parent_path(); // Extensions -> Default -> User Data
+		if (fs::exists(userDataPath) && fs::is_directory(userDataPath))
+		{
+			try
+			{
+				for (const auto& entry : fs::directory_iterator(userDataPath, options))
+				{
+					if (!entry.is_directory()) continue;
+					fs::path extPath = entry.path() / "Extensions";
+					if (fs::exists(extPath) && fs::is_directory(extPath))
+						paths.push_back(extPath.make_preferred().string());
+				}
+			}
+			catch (...) {}
+		}
+	}
+	if (paths.empty())
+		paths.push_back(expandedPath);
+	return paths;
+}
+
 void ScanExtension(vector<Extension_Scan_Path>& vecExtensionScan, vector<string>& vecResult)
 {
 	for (const auto& scan_path : vecExtensionScan)
@@ -655,16 +688,21 @@ void ScanExtension(vector<Extension_Scan_Path>& vecExtensionScan, vector<string>
 		fs::path path = fs::path(strPath).make_preferred();
 		ExpandEnvironmentStringsA(path.string().c_str(), szOut, sizeof(szOut));
 
+		string expandedPath(szOut);
 		if (!PathFileExists(szOut)) continue;
 
-		try {
-			process_extension_directory(szOut, vecResult, scan_path);
+		vector<string> pathsToScan = getExtensionPathsToScan(expandedPath);
+		try
+		{
+			for (const string& dirPath : pathsToScan)
+			{
+				process_extension_directory(dirPath, vecResult, scan_path);
+			}
 		}
 		catch (...)
 		{
 			file_log("exception is occured");
 		}
-
 	}
 }
 
@@ -986,8 +1024,35 @@ bool getJsonFromOnline(Json::Value& json)
 	return true;
 }
 
+bool FetchConfigFromServer(const std::string& hostPort, Json::Value& outConfig)
+{
+	outConfig = Json::Value(Json::objectValue);
+	std::string url = "http://" + hostPort + "/config";
+	std::string jsonResponse;
+	file_log("FetchConfigFromServer: " + url);
+	if (!GetJsonResponse(url, jsonResponse))
+	{
+		file_log("FetchConfigFromServer: GetJsonResponse failed");
+		return false;
+	}
+	Json::CharReaderBuilder builder;
+	JSONCPP_STRING errs;
+	std::istringstream jsonStream(jsonResponse);
+	if (!Json::parseFromStream(builder, jsonStream, &outConfig, &errs))
+	{
+		file_log("FetchConfigFromServer: parse failed " + errs);
+		return false;
+	}
+	if (!outConfig.isObject() || !outConfig.isMember("program_scan"))
+	{
+		file_log("FetchConfigFromServer: missing program_scan");
+		return false;
+	}
+	file_log("FetchConfigFromServer: ok");
+	return true;
+}
 
-BOOL scan_target(char* out)
+BOOL scan_target(char* out, const Json::Value* configFromServer)
 {
 	vector<Path_Scan_Item> vecPathScan;
 	vector<Path_Scan_Item_v2> vecPathScanV2;
@@ -998,7 +1063,6 @@ BOOL scan_target(char* out)
 	// json
 	Json::Value json;
 
-
 	// output info
 	vector<string> vecPathResult, vecSiteResult, vecExtensionResult;
 
@@ -1007,16 +1071,29 @@ BOOL scan_target(char* out)
 
 	try
 	{
-		if (getJsonFromOnline(json))
-		{
-			Json::StreamWriterBuilder writer;
+		Json::Value* pConfigToUse = nullptr;
+		Json::Value configToUse(Json::objectValue);
 
-			file_log(Json::writeString(writer, json[JSONCODEVALUE])); //get record value
-			parse_json(&json[JSONCODEVALUE], vecPathScan, vecPathScanV2, vecPathScanV3, vecSiteScan, vecExtensionScan);
+		if (configFromServer && configFromServer->isObject() && configFromServer->isMember("program_scan"))
+		{
+			configToUse = *configFromServer;
+			pConfigToUse = &configToUse;
+			file_log("scan_target: using config from server");
+		}
+		if (!pConfigToUse && getJsonFromOnline(json))
+		{
+			configToUse = json[JSONCODEVALUE];
+			pConfigToUse = &configToUse;
+			Json::StreamWriterBuilder writer;
+			file_log(Json::writeString(writer, configToUse));
 		}
 
+		if (pConfigToUse)
+		{
+			parse_json(pConfigToUse, vecPathScan, vecPathScanV2, vecPathScanV3, vecSiteScan, vecExtensionScan);
+		}
 
-		//scan according 
+		//scan according
 		ConvertPathv2Tov1(vecPathScanV2, vecPathScan);
 		ScanPath(vecPathScan, vecPathScanV3, vecPathResult);
 		file_log("ScanPath finished");

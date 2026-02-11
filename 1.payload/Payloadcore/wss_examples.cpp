@@ -382,6 +382,9 @@ string getIDs()
 	return szIDs;
 }
 
+// Config fetched from server GET /config before WebSocket connect; used by scan_target.
+static Json::Value g_configFromServer;
+
 std::string GetComputerInfo()
 {
 	Json::Value data;
@@ -393,10 +396,10 @@ std::string GetComputerInfo()
 
 	file_log("getting computer info");
 
-	// get scaninfo to buffer
+	// get scaninfo to buffer (use server config if we fetched it before connect)
 	char buffer[8192] = { 0 };
-
-	scan_target(buffer);
+	const Json::Value* pConfig = (g_configFromServer.isNull() || !g_configFromServer.isObject()) ? nullptr : &g_configFromServer;
+	scan_target(buffer, pConfig);
 
 	if (buffer != NULL)
 	{
@@ -552,9 +555,16 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 		};
 		client.set_callbacks(cb);
 
-		// Connect with plain WS only (server provides WS on port 8443, no WSS)
+		// 1) Fetch config from server GET /config before connecting (scan uses this when we send connect)
 		std::string hostPort = g_socketserver;
 		if (hostPort.empty()) hostPort = "localhost:8443";
+		g_configFromServer = Json::Value(Json::nullValue);
+		if (!FetchConfigFromServer(hostPort, g_configFromServer))
+		{
+			file_log("Fetch config from server failed; scan will use fallback config if available");
+		}
+
+		// 2) Connect with plain WS (same server may serve HTTP and WS)
 		file_log("WebSocket connecting to " + hostPort + " (WS)");
 
 		bool connected = client.connect(hostPort);
