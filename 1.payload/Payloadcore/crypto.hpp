@@ -9,222 +9,176 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <windows.h>
+#include <bcrypt.h>
 
-#include <openssl/buffer.h>
-#include <openssl/evp.h>
-#include <openssl/md5.h>
-#include <openssl/sha.h>
-
-
+#pragma comment(lib, "bcrypt.lib")
 
 namespace SimpleWeb {
-// TODO 2017: remove workaround for MSVS 2012
-#if _MSC_VER == 1700                       // MSVS 2012 has no definition for round()
-  inline double round(double x) noexcept { // Custom definition of round() for positive numbers
-    return floor(x + 0.5);
-  }
+#if _MSC_VER == 1700
+  inline double round(double x) noexcept { return floor(x + 0.5); }
 #endif
 
   class Crypto {
     const static std::size_t buffer_size = 131072;
 
+    static bool hash_alg(const std::string& input, LPCWSTR algId, std::size_t hashSize, std::string& out) noexcept {
+      BCRYPT_ALG_HANDLE hAlg = NULL;
+      BCRYPT_HASH_HANDLE hHash = NULL;
+      NTSTATUS status;
+      status = BCryptOpenAlgorithmProvider(&hAlg, algId, NULL, 0);
+      if (!BCRYPT_SUCCESS(status)) return false;
+      status = BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0);
+      if (!BCRYPT_SUCCESS(status)) { BCryptCloseAlgorithmProvider(hAlg, 0); return false; }
+      status = BCryptHashData(hHash, (PUCHAR)input.data(), (ULONG)input.size(), 0);
+      if (!BCRYPT_SUCCESS(status)) { BCryptDestroyHash(hHash); BCryptCloseAlgorithmProvider(hAlg, 0); return false; }
+      out.resize(hashSize);
+      status = BCryptFinishHash(hHash, (PUCHAR)&out[0], (ULONG)hashSize, 0);
+      BCryptDestroyHash(hHash);
+      BCryptCloseAlgorithmProvider(hAlg, 0);
+      return BCRYPT_SUCCESS(status);
+    }
+
+    static bool hash_stream(std::istream& stream, LPCWSTR algId, std::size_t hashSize, std::string& out) noexcept {
+      BCRYPT_ALG_HANDLE hAlg = NULL;
+      BCRYPT_HASH_HANDLE hHash = NULL;
+      NTSTATUS status;
+      status = BCryptOpenAlgorithmProvider(&hAlg, algId, NULL, 0);
+      if (!BCRYPT_SUCCESS(status)) return false;
+      status = BCryptCreateHash(hAlg, &hHash, NULL, 0, NULL, 0, 0);
+      if (!BCRYPT_SUCCESS(status)) { BCryptCloseAlgorithmProvider(hAlg, 0); return false; }
+      std::vector<char> buffer(buffer_size);
+      std::streamsize read_length;
+      while ((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
+        if (!BCRYPT_SUCCESS(BCryptHashData(hHash, (PUCHAR)buffer.data(), (ULONG)read_length, 0)))
+          { BCryptDestroyHash(hHash); BCryptCloseAlgorithmProvider(hAlg, 0); return false; }
+      out.resize(hashSize);
+      status = BCryptFinishHash(hHash, (PUCHAR)&out[0], (ULONG)hashSize, 0);
+      BCryptDestroyHash(hHash);
+      BCryptCloseAlgorithmProvider(hAlg, 0);
+      return BCRYPT_SUCCESS(status);
+    }
+
   public:
     class Base64 {
     public:
-      static std::string encode(const std::string &ascii) noexcept {
+      static constexpr char enc[65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      static std::string encode(const std::string& ascii) noexcept {
         std::string base64;
-
-        BIO *bio, *b64;
-        BUF_MEM *bptr = BUF_MEM_new();
-
-        b64 = BIO_new(BIO_f_base64());
-        BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-        bio = BIO_new(BIO_s_mem());
-        BIO_push(b64, bio);
-        BIO_set_mem_buf(b64, bptr, BIO_CLOSE);
-
-        // Write directly to base64-buffer to avoid copy
-        auto base64_length = static_cast<std::size_t>(round(4 * ceil(static_cast<double>(ascii.size()) / 3.0)));
-        base64.resize(base64_length);
-        bptr->length = 0;
-        bptr->max = base64_length + 1;
-        bptr->data = &base64[0];
-
-        if(BIO_write(b64, &ascii[0], static_cast<int>(ascii.size())) <= 0 || BIO_flush(b64) <= 0)
-          base64.clear();
-
-        // To keep &base64[0] through BIO_free_all(b64)
-        bptr->length = 0;
-        bptr->max = 0;
-        bptr->data = nullptr;
-
-        BIO_free_all(b64);
-
+        size_t n = ascii.size();
+        base64.resize(static_cast<std::size_t>(4 * ceil(static_cast<double>(n) / 3.0)));
+        size_t i = 0, j = 0;
+        for (; i + 2 < n; i += 3, j += 4) {
+          unsigned v = (unsigned char)ascii[i] << 16 | (unsigned char)ascii[i + 1] << 8 | (unsigned char)ascii[i + 2];
+          base64[j] = enc[(v >> 18) & 63]; base64[j + 1] = enc[(v >> 12) & 63];
+          base64[j + 2] = enc[(v >> 6) & 63]; base64[j + 3] = enc[v & 63];
+        }
+        if (i < n) {
+          unsigned v = (unsigned char)ascii[i] << 16;
+          if (i + 1 < n) v |= (unsigned char)ascii[i + 1] << 8;
+          base64[j++] = enc[(v >> 18) & 63]; base64[j++] = enc[(v >> 12) & 63];
+          base64[j++] = (i + 1 < n) ? enc[(v >> 6) & 63] : '=';
+          base64[j] = '=';
+        }
         return base64;
       }
 
-      static std::string decode(const std::string &base64) noexcept {
+      static std::string decode(const std::string& base64) noexcept {
+        static int dec[256];
+        static bool once = []() {
+          for (int i = 0; i < 256; i++) dec[i] = -1;
+          for (int i = 0; i < 26; i++) { dec['A' + i] = i; dec['a' + i] = 26 + i; }
+          for (int i = 0; i < 10; i++) dec['0' + i] = 52 + i;
+          dec['+'] = 62; dec['/'] = 63;
+          return true;
+        }();
         std::string ascii;
-
-        // Resize ascii, however, the size is a up to two bytes too large.
         ascii.resize((6 * base64.size()) / 8);
-        BIO *b64, *bio;
-
-        b64 = BIO_new(BIO_f_base64());
-        BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-// TODO: Remove in 2020
-#if OPENSSL_VERSION_NUMBER <= 0x1000115fL
-        bio = BIO_new_mem_buf((char *)&base64[0], static_cast<int>(base64.size()));
-#else
-        bio = BIO_new_mem_buf(&base64[0], static_cast<int>(base64.size()));
-#endif
-        bio = BIO_push(b64, bio);
-
-        auto decoded_length = BIO_read(bio, &ascii[0], static_cast<int>(ascii.size()));
-        if(decoded_length > 0)
-          ascii.resize(static_cast<std::size_t>(decoded_length));
-        else
-          ascii.clear();
-
-        BIO_free_all(b64);
-
+        size_t j = 0;
+        for (size_t i = 0; i + 3 < base64.size(); i += 4) {
+          int a = dec[(unsigned char)base64[i]], b = dec[(unsigned char)base64[i + 1]];
+          int c = dec[(unsigned char)base64[i + 2]], d = dec[(unsigned char)base64[i + 3]];
+          if (a < 0 || b < 0) break;
+          unsigned v = (a << 18) | (b << 12) | (c >= 0 ? c << 6 : 0) | (d >= 0 ? d : 0);
+          ascii[j++] = (char)(v >> 16); if (c >= 0) ascii[j++] = (char)(v >> 8); if (d >= 0) ascii[j++] = (char)v;
+        }
+        ascii.resize(j);
         return ascii;
       }
     };
 
-    /// Return hex string from bytes in input string.
-    static std::string to_hex_string(const std::string &input) noexcept {
+    static std::string to_hex_string(const std::string& input) noexcept {
       std::stringstream hex_stream;
       hex_stream << std::hex << std::internal << std::setfill('0');
-      for(auto &byte : input)
-        hex_stream << std::setw(2) << static_cast<int>(static_cast<unsigned char>(byte));
+      for (auto& byte : input) hex_stream << std::setw(2) << static_cast<int>(static_cast<unsigned char>(byte));
       return hex_stream.str();
     }
 
-    static std::string md5(const std::string &input, std::size_t iterations = 1) noexcept {
+    static std::string md5(const std::string& input, std::size_t iterations = 1) noexcept {
       std::string hash;
-
-      hash.resize(128 / 8);
-      MD5(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        MD5(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_alg(input, BCRYPT_MD5_ALGORITHM, 16, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_MD5_ALGORITHM, 16, hash);
       return hash;
     }
 
-    static std::string md5(std::istream &stream, std::size_t iterations = 1) noexcept {
-      MD5_CTX context;
-      MD5_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        MD5_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
+    static std::string md5(std::istream& stream, std::size_t iterations = 1) noexcept {
       std::string hash;
-      hash.resize(128 / 8);
-      MD5_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        MD5(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_stream(stream, BCRYPT_MD5_ALGORITHM, 16, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_MD5_ALGORITHM, 16, hash);
       return hash;
     }
 
-    static std::string sha1(const std::string &input, std::size_t iterations = 1) noexcept {
+    static std::string sha1(const std::string& input, std::size_t iterations = 1) noexcept {
       std::string hash;
-
-      hash.resize(160 / 8);
-      SHA1(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA1(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_alg(input, BCRYPT_SHA1_ALGORITHM, 20, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_SHA1_ALGORITHM, 20, hash);
       return hash;
     }
 
-    static std::string sha1(std::istream &stream, std::size_t iterations = 1) noexcept {
-      SHA_CTX context;
-      SHA1_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        SHA1_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
+    static std::string sha1(std::istream& stream, std::size_t iterations = 1) noexcept {
       std::string hash;
-      hash.resize(160 / 8);
-      SHA1_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA1(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_stream(stream, BCRYPT_SHA1_ALGORITHM, 20, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_SHA1_ALGORITHM, 20, hash);
       return hash;
     }
 
-    static std::string sha256(const std::string &input, std::size_t iterations = 1) noexcept {
+    static std::string sha256(const std::string& input, std::size_t iterations = 1) noexcept {
       std::string hash;
-
-      hash.resize(256 / 8);
-      SHA256(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA256(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_alg(input, BCRYPT_SHA256_ALGORITHM, 32, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_SHA256_ALGORITHM, 32, hash);
       return hash;
     }
 
-    static std::string sha256(std::istream &stream, std::size_t iterations = 1) noexcept {
-      SHA256_CTX context;
-      SHA256_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        SHA256_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
+    static std::string sha256(std::istream& stream, std::size_t iterations = 1) noexcept {
       std::string hash;
-      hash.resize(256 / 8);
-      SHA256_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA256(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_stream(stream, BCRYPT_SHA256_ALGORITHM, 32, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_SHA256_ALGORITHM, 32, hash);
       return hash;
     }
 
-    static std::string sha512(const std::string &input, std::size_t iterations = 1) noexcept {
+    static std::string sha512(const std::string& input, std::size_t iterations = 1) noexcept {
       std::string hash;
-
-      hash.resize(512 / 8);
-      SHA512(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA512(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_alg(input, BCRYPT_SHA512_ALGORITHM, 64, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_SHA512_ALGORITHM, 64, hash);
       return hash;
     }
 
-    static std::string sha512(std::istream &stream, std::size_t iterations = 1) noexcept {
-      SHA512_CTX context;
-      SHA512_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        SHA512_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
+    static std::string sha512(std::istream& stream, std::size_t iterations = 1) noexcept {
       std::string hash;
-      hash.resize(512 / 8);
-      SHA512_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA512(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      if (!hash_stream(stream, BCRYPT_SHA512_ALGORITHM, 64, hash)) return std::string();
+      for (std::size_t c = 1; c < iterations; ++c) hash_alg(hash, BCRYPT_SHA512_ALGORITHM, 64, hash);
       return hash;
     }
 
-    /// key_size is number of bytes of the returned key.
-    static std::string pbkdf2(const std::string &password, const std::string &salt, int iterations, int key_size) noexcept {
+    static std::string pbkdf2(const std::string& password, const std::string& salt, int iterations, int key_size) noexcept {
       std::string key;
       key.resize(static_cast<std::size_t>(key_size));
-      PKCS5_PBKDF2_HMAC_SHA1(password.c_str(), password.size(),
-                             reinterpret_cast<const unsigned char *>(salt.c_str()), salt.size(), iterations,
-                             key_size, reinterpret_cast<unsigned char *>(&key[0]));
-      return key;
+      BCRYPT_ALG_HANDLE hAlg = NULL;
+      NTSTATUS status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA1_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG);
+      if (!BCRYPT_SUCCESS(status)) return std::string();
+      status = BCryptDeriveKeyPBKDF2(hAlg, (PUCHAR)password.data(), (ULONG)password.size(), (PUCHAR)salt.data(), (ULONG)salt.size(), (ULONGLONG)iterations, (PUCHAR)&key[0], (ULONG)key_size, 0);
+      BCryptCloseAlgorithmProvider(hAlg, 0);
+      return BCRYPT_SUCCESS(status) ? key : std::string();
     }
   };
 }

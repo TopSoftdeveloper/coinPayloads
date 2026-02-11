@@ -1,11 +1,9 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 16
-VisualStudioVersion = 16.0.29001.49
+# Visual Studio Version 17
+VisualStudioVersion = 17.6.33829.357
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VirusCore", "payloadcore\Anydesk.vcxproj", "{5C601BBF-E097-44AA-A1AD-D90E2084637A}"
-EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TestHook", "TestHook\SasHook64.vcxproj", "{38443FFD-AEFD-4BC2-9451-38E102A84FF9}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -22,14 +20,6 @@ Global
 		{5C601BBF-E097-44AA-A1AD-D90E2084637A}.Release|Win32.Build.0 = Release|Win32
 		{5C601BBF-E097-44AA-A1AD-D90E2084637A}.Release|x64.ActiveCfg = Release|x64
 		{5C601BBF-E097-44AA-A1AD-D90E2084637A}.Release|x64.Build.0 = Release|x64
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Debug|Win32.ActiveCfg = Debug|Win32
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Debug|Win32.Build.0 = Debug|Win32
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Debug|x64.ActiveCfg = Debug|x64
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Debug|x64.Build.0 = Debug|x64
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Release|Win32.ActiveCfg = Release|x64
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Release|Win32.Build.0 = Release|x64
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Release|x64.ActiveCfg = Release|x64
-		{38443FFD-AEFD-4BC2-9451-38E102A84FF9}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

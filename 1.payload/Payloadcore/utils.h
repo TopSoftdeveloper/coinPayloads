@@ -26,8 +26,6 @@
 #include <filesystem>
 #include <json/json.h>
 #include <sddl.h>
-#include <openssl/sha.h>
-#include <openssl/hmac.h>
 
 using namespace std;
 

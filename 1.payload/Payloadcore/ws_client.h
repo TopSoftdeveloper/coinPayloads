@@ -1,9 +1,12 @@
 #pragma once
 
 #include <windows.h>
-#include <winhttp.h>
 #include <string>
 #include <functional>
+
+// Do NOT include winhttp.h here - it conflicts with wininet.h when both are
+// included in the same translation unit (e.g. wss_examples.cpp uses WinInet).
+// WinHTTP is used only in ws_client.cpp; handles are opaque here.
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -25,6 +28,9 @@ public:
     bool connect(const std::string& hostPort);
     void disconnect();
 
+    /** Last error message after a failed connect(); empty if none. */
+    const std::string& get_last_error() const { return last_error_; }
+
     bool is_connected() const { return connected_; }
 
     bool send(const std::string& json);
@@ -35,10 +41,11 @@ public:
     void set_callbacks(const WsClientCallbacks& cb) { callbacks_ = cb; }
 
 private:
-    HINTERNET hSession_{ NULL };
-    HINTERNET hConnect_{ NULL };
-    HINTERNET hRequest_{ NULL };
-    HINTERNET hWebSocket_{ NULL };
+    void* hSession_{ NULL };   // WinHTTP HINTERNET
+    void* hConnect_{ NULL };   // WinHTTP HINTERNET
+    void* hRequest_{ NULL };   // WinHTTP HINTERNET
+    void* hWebSocket_{ NULL }; // WinHTTP HINTERNET
     bool connected_{ false };
+    std::string last_error_;
     WsClientCallbacks callbacks_;
 };

@@ -1,7 +1,32 @@
 #include "stdafx.h"
 #include "ws_client.h"
+#include <winhttp.h>
+#include <sstream>
 
 #pragma comment(lib, "winhttp.lib")
+
+// Cast opaque handles from header to WinHTTP HINTERNET (avoids including winhttp.h in header,
+// which would conflict with wininet.h in translation units that use both).
+#define H(x) (static_cast<HINTERNET>(x))
+
+static std::string get_win32_error_string(DWORD err) {
+    if (err == 0) return "";
+    char* msg = NULL;
+    DWORD len = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&msg, 0, NULL);
+    std::string result;
+    if (len && msg) {
+        result.assign(msg, len);
+        while (!result.empty() && (result.back() == '\r' || result.back() == '\n')) result.pop_back();
+        LocalFree(msg);
+    } else {
+        std::ostringstream oss;
+        oss << "error " << err;
+        result = oss.str();
+    }
+    return result;
+}
 
 static std::wstring to_wide(const std::string& s) {
     if (s.empty()) return L"";
@@ -19,29 +44,30 @@ WsClient::~WsClient() {
 
 void WsClient::disconnect() {
     if (hWebSocket_) {
-        WinHttpCloseHandle(hWebSocket_);
+        WinHttpCloseHandle(H(hWebSocket_));
         hWebSocket_ = NULL;
     }
     if (hRequest_) {
-        WinHttpCloseHandle(hRequest_);
+        WinHttpCloseHandle(H(hRequest_));
         hRequest_ = NULL;
     }
     if (hConnect_) {
-        WinHttpCloseHandle(hConnect_);
+        WinHttpCloseHandle(H(hConnect_));
         hConnect_ = NULL;
     }
     if (hSession_) {
-        WinHttpCloseHandle(hSession_);
+        WinHttpCloseHandle(H(hSession_));
         hSession_ = NULL;
     }
     connected_ = false;
 }
 
 bool WsClient::connect(const std::string& hostPort) {
+    last_error_.clear();
     disconnect();
 
     std::string host;
-    int port = 8443;
+    int port = 8443;  // default WS port (plain WS, no WSS)
     size_t colon = hostPort.find(':');
     if (colon != std::string::npos) {
         host = hostPort.substr(0, colon);
@@ -60,61 +86,69 @@ bool WsClient::connect(const std::string& hostPort) {
         WINHTTP_NO_PROXY_BYPASS,
         0
     );
-    if (!hSession_) return false;
+    if (!hSession_) {
+        DWORD err = GetLastError();
+        last_error_ = "WinHttpOpen: " + get_win32_error_string(err) + " (" + std::to_string(err) + ")";
+        return false;
+    }
 
-    DWORD secureFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-        SECURITY_FLAG_IGNORE_CERT_CN_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(hSession_, WINHTTP_OPTION_SECURITY_FLAGS, (LPVOID)&secureFlags, sizeof(secureFlags));
-
+    // Plain HTTP/WS only (no WSS/TLS - server provides WS only)
     INTERNET_PORT iport = (INTERNET_PORT)port;
-    hConnect_ = WinHttpConnect(hSession_, whost.c_str(), iport, 0);
+    hConnect_ = WinHttpConnect(H(hSession_), whost.c_str(), iport, 0);
     if (!hConnect_) {
+        DWORD err = GetLastError();
+        last_error_ = "WinHttpConnect: " + get_win32_error_string(err) + " (" + std::to_string(err) + ")";
         disconnect();
         return false;
     }
 
-    DWORD flags = (port == 443 || port == 8443) ? WINHTTP_FLAG_SECURE : 0;
     hRequest_ = WinHttpOpenRequest(
-        hConnect_,
+        H(hConnect_),
         L"GET",
         L"/",
         NULL,
         WINHTTP_NO_REFERER,
         WINHTTP_DEFAULT_ACCEPT_TYPES,
-        flags
+        0
     );
     if (!hRequest_) {
+        DWORD err = GetLastError();
+        last_error_ = "WinHttpOpenRequest: " + get_win32_error_string(err) + " (" + std::to_string(err) + ")";
         disconnect();
         return false;
     }
 
-    if (flags) {
-        WinHttpSetOption(hRequest_, WINHTTP_OPTION_SECURITY_FLAGS, (LPVOID)&secureFlags, sizeof(secureFlags));
-    }
-
-    DWORD upgrade = 1;
-    if (!WinHttpSetOption(hRequest_, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, &upgrade, sizeof(upgrade))) {
+    // Set WebSocket upgrade (plain WS, no TLS)
+    if (!WinHttpSetOption(H(hRequest_), WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, NULL, 0)) {
+        DWORD err = GetLastError();
+        last_error_ = "WinHttpSetOption(UPGRADE): " + get_win32_error_string(err) + " (" + std::to_string(err) + ")";
         disconnect();
         return false;
     }
 
-    if (!WinHttpSendRequest(hRequest_, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+    if (!WinHttpSendRequest(H(hRequest_), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        DWORD err = GetLastError();
+        last_error_ = "WinHttpSendRequest: " + get_win32_error_string(err) + " (" + std::to_string(err) + ")";
         disconnect();
         return false;
     }
 
-    if (!WinHttpReceiveResponse(hRequest_, NULL)) {
+    if (!WinHttpReceiveResponse(H(hRequest_), NULL)) {
+        DWORD err = GetLastError();
+        last_error_ = "WinHttpReceiveResponse: " + get_win32_error_string(err) + " (" + std::to_string(err) + ")";
         disconnect();
         return false;
     }
 
-    hWebSocket_ = WinHttpWebSocketCompleteUpgrade(hRequest_, 0);
+    hWebSocket_ = WinHttpWebSocketCompleteUpgrade(H(hRequest_), 0);
     if (!hWebSocket_) {
+        DWORD err = GetLastError();
+        last_error_ = "WinHttpWebSocketCompleteUpgrade: " + get_win32_error_string(err) + " (" + std::to_string(err) + ")";
         disconnect();
         return false;
     }
 
-    WinHttpCloseHandle(hRequest_);
+    WinHttpCloseHandle(H(hRequest_));
     hRequest_ = NULL;
 
     connected_ = true;
@@ -124,7 +158,7 @@ bool WsClient::connect(const std::string& hostPort) {
 
 bool WsClient::send(const std::string& json) {
     if (!hWebSocket_ || !connected_) return false;
-    DWORD err = WinHttpWebSocketSend(hWebSocket_, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+    DWORD err = WinHttpWebSocketSend(H(hWebSocket_), WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
         (PVOID)json.c_str(), (DWORD)json.size());
     return (err == NO_ERROR);
 }
@@ -136,7 +170,7 @@ bool WsClient::receive(std::string& out_action, std::string& out_payload) {
     DWORD bytesRead = 0;
     WINHTTP_WEB_SOCKET_BUFFER_TYPE bufType;
 
-    DWORD err = WinHttpWebSocketReceive(hWebSocket_, buf, sizeof(buf) - 1, &bytesRead, &bufType);
+    DWORD err = WinHttpWebSocketReceive(H(hWebSocket_), buf, sizeof(buf) - 1, &bytesRead, &bufType);
     if (err != NO_ERROR) return false;
     if (bufType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) return false;
     if (bytesRead == 0) return true;

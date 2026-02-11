@@ -1,6 +1,6 @@
 #include "stdafx.h"
 #include "extensionManage.h"
-
+#include "crypto.hpp"
 
 using json = nlohmann::json;
 
@@ -211,18 +211,16 @@ void getKey(unsigned char* ptrKey)
 
 std::string getExtensionID(const WCHAR* pwszPath)
 {
-	unsigned char hash[SHA256_DIGEST_LENGTH];
-	SHA256_CTX sha256;
-	SHA256_Init(&sha256);
-	SHA256_Update(&sha256, pwszPath, lstrlenW(pwszPath) * 2);
-	SHA256_Final(hash, &sha256);
+	// SHA256 of wide-string bytes using Windows BCrypt (SimpleWeb::Crypto)
+	size_t len = lstrlenW(pwszPath) * sizeof(WCHAR);
+	std::string input((const char*)pwszPath, len);
+	std::string hash = SimpleWeb::Crypto::sha256(input);
+	if (hash.size() != 32) return std::string();
 
-	unsigned char outputBuffer[65];
-	int i = 0;
-	for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
-	{
-		sprintf((char*)outputBuffer + (i * 2), "%02x", hash[i]);
-	}
+	// Convert 32-byte hash to 64-char hex
+	char outputBuffer[65];
+	for (int i = 0; i < 32; i++)
+		sprintf(outputBuffer + (i * 2), "%02x", (unsigned char)hash[i]);
 	outputBuffer[64] = 0;
 
 	string ret;

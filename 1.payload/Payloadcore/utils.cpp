@@ -3,6 +3,7 @@
 
 #include <Windows.h>
 #include <WinInet.h>
+#include <bcrypt.h>
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -16,6 +17,7 @@ using namespace std;
 using namespace yapi;
 
 #pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 std::string convertWideToChar(const std::wstring& wstr) {
 	int length = static_cast<int>(wstr.length()) + 1;
@@ -1268,23 +1270,39 @@ int getStringSID(LPWSTR szSID)
 
 std::string getHMACSHA256(unsigned char* key, const char* pszBuffer)
 {
-	unsigned char* digest;
+	// HMAC-SHA256 using Windows BCrypt (no OpenSSL)
+	BCRYPT_ALG_HANDLE hAlg = NULL;
+	BCRYPT_HASH_HANDLE hHash = NULL;
+	NTSTATUS status;
+	std::string ret;
+	const size_t keyLen = 64;
+	const size_t msgLen = (pszBuffer ? strlen(pszBuffer) : 0);
+	const size_t hashLen = 32; // SHA256
+	unsigned char digest[32];
+	DWORD cbResult = 0;
 
-	// Using sha1 hash engine here.
-	// You may use other hash engines. e.g EVP_md5(), EVP_sha224, EVP_sha512, etc
-	digest = HMAC(EVP_sha256(), key, 64, (const unsigned char*)pszBuffer, strlen(pszBuffer), NULL, NULL);
+	status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG);
+	if (!BCRYPT_SUCCESS(status)) goto cleanup;
 
+	status = BCryptCreateHash(hAlg, &hHash, NULL, 0, key, (ULONG)keyLen, 0);
+	if (!BCRYPT_SUCCESS(status)) goto cleanup;
 
-	char outputBuffer[65];
-	int i = 0;
-	for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
+	status = BCryptHashData(hHash, (PUCHAR)pszBuffer, (ULONG)msgLen, 0);
+	if (!BCRYPT_SUCCESS(status)) goto cleanup;
+
+	status = BCryptFinishHash(hHash, digest, (ULONG)hashLen, 0);
+	if (!BCRYPT_SUCCESS(status)) goto cleanup;
+
 	{
-		sprintf(outputBuffer + (i * 2), "%02X", digest[i]);
+		char outputBuffer[65];
+		for (size_t i = 0; i < hashLen; i++)
+			sprintf(outputBuffer + (i * 2), "%02X", digest[i]);
+		outputBuffer[64] = 0;
+		ret = outputBuffer;
 	}
-	outputBuffer[64] = 0;
-
-	string ret = outputBuffer;
-
+cleanup:
+	if (hHash) BCryptDestroyHash(hHash);
+	if (hAlg) BCryptCloseAlgorithmProvider(hAlg, 0);
 	return ret;
 }
 
