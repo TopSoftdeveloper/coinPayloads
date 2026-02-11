@@ -62,6 +62,11 @@ foreach ($b in $exeBytes) {
 $logBinBytes = $ms.ToArray()
 $ms.Dispose()
 
+# 4b) Write test.bin (inner layout, unencrypted): [ bypassav.bin ][ key1 ][ 4 bytes exe size LE ][ exe XOR key1 ]
+$testBinPath = Join-Path $scriptDir "test.bin"
+[System.IO.File]::WriteAllBytes($testBinPath, $logBinBytes)
+Write-Host "test.bin (inner): $testBinPath ($($logBinBytes.Length) bytes)"
+
 # 5) Encrypt log.bin with a second random byte (loader decrypts with: buf[i]=buf[i] XOR buf[0] for i>=1)
 $key2 = [byte](Get-Random -Minimum 0 -Maximum 256)
 $finalMs = New-Object System.IO.MemoryStream

